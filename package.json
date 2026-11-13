@@ -1,0 +1,34 @@
+{
+  "name": "clientinspector-pro",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "SDK e API Oficial de Inspeção de Conexão, IP Público (IPv4/IPv6), ASN, Geolocalização Anycast e User-Agent na Cloudflare Edge (<2ms).",
+  "main": "clientinspector-pro.js",
+  "module": "clientinspector-pro.js",
+  "types": "types/index.d.ts",
+  "scripts": {
+    "test": "node test.js",
+    "deploy": "wrangler deploy"
+  },
+  "keywords": [
+    "ip",
+    "meu-ip",
+    "geolocation",
+    "user-agent",
+    "browser-detection",
+    "asn",
+    "cloudflare-worker",
+    "edge-computing",
+    "sdk"
+  ],
+  "author": "clepta2 <clepta2@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clepta2/clientinspector-pro.git"
+  },
+  "bugs": {
+    "url": "https://github.com/clepta2/clientinspector-pro/issues"
+  },
+  "homepage": "https://github.com/clepta2/clientinspector-pro#readme"
+}

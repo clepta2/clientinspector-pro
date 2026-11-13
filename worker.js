@@ -1073,7 +1073,16 @@ export default async function handleRequest(request, env, ctx) {
 
   // 2. Rate Limit na borda (300/min com token, 90/min anônimo)
   const authHeader = request.headers.get('Authorization') || request.headers.get('x-api-key') || '';
-  const isAuth = authHeader.length > 10;
+  const cleanKey = authHeader.replace(/^Bearer\s+/i, '').trim();
+  const isAuth = Boolean(
+    cleanKey && (
+      cleanKey.startsWith('cli_live_') || 
+      cleanKey.startsWith('cli_pro_') || 
+      cleanKey.startsWith('cli_master_') || 
+      cleanKey.startsWith('pnt_live_') ||
+      (env && (env.API_KEY === cleanKey || env.PRO_KEY === cleanKey))
+    ) && cleanKey.length >= 16
+  );
   const ipVisitante = clientIp(request);
   const maxReqs = isAuth ? 300 : 90;
   const rl = await rateLimit(`ip-info:${ipVisitante}`, maxReqs, 60, env);

@@ -955,11 +955,11 @@ export async function resolverGeolocalizacaoEConexao(ip, infoIp, cf = {}, isCons
     return cached.dados;
   }
 
-  // Lookup online leve com timeout estrito de 1.2 segundos
+  // Lookup online leve com timeout estrito de 1.2 segundos (100% HTTPS para conformidade com segurança Cloudflare)
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 1200);
-    const lookupRes = await fetch(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as`, {
+    const lookupRes = await fetch(`https://ipwhois.app/json/${encodeURIComponent(ip)}`, {
       signal: ctrl.signal,
       headers: { 'Accept': 'application/json' }
     });
@@ -967,12 +967,12 @@ export async function resolverGeolocalizacaoEConexao(ip, infoIp, cf = {}, isCons
 
     if (lookupRes.ok) {
       const data = await lookupRes.json();
-      if (data && data.status === 'success') {
-        const pCode = (data.countryCode || '').toUpperCase();
+      if (data && (data.success !== false)) {
+        const pCode = (data.country_code || '').toUpperCase();
         const pInfo = PAISES_MAP[pCode] || { nome: data.country || pCode, flag: '🌐', continente: 'Desconhecido' };
         const prov = data.org || data.isp || 'Desconhecido';
-        const asnNum = data.as ? parseInt(data.as.replace(/\D/g, ''), 10) : null;
-        const isHosting = HOSTING_KEYWORDS.some(k => prov.toLowerCase().includes(k) || (data.as || '').toLowerCase().includes(k));
+        const asnNum = data.asn ? parseInt(String(data.asn).replace(/\D/g, ''), 10) : null;
+        const isHosting = HOSTING_KEYWORDS.some(k => prov.toLowerCase().includes(k) || (String(data.asn) || '').toLowerCase().includes(k));
 
         const resLookup = {
           geolocalizacao: {
@@ -981,19 +981,19 @@ export async function resolverGeolocalizacaoEConexao(ip, infoIp, cf = {}, isCons
             paisNome: pInfo.nome,
             bandeira: pInfo.flag,
             continente: pInfo.continente,
-            estado: data.region || data.regionName,
-            cidade: data.city,
-            codigoPostal: data.zip,
-            fusoHorario: data.timezone,
+            estado: data.region || null,
+            cidade: data.city || null,
+            codigoPostal: data.postal || null,
+            fusoHorario: data.timezone_gmt || null,
             metroCode: null,
-            coordenadas: { latitude: data.lat, longitude: data.lon },
+            coordenadas: { latitude: data.latitude, longitude: data.longitude },
             origemDados: 'ip_lookup_service'
           },
           conexao: {
             asn: asnNum,
             provedor: prov,
             datacenterColo: 'INTERNET',
-            datacenterDescricao: data.as || prov,
+            datacenterDescricao: data.asn || prov,
             protocoloHttp: 'HTTP/2',
             tls: { versao: 'TLSv1.3', cipher: null }
           },
@@ -1013,7 +1013,7 @@ export async function resolverGeolocalizacaoEConexao(ip, infoIp, cf = {}, isCons
       }
     }
   } catch (_) {
-    // Timeout ou erro de rede: continua para fallback
+    // Timeout ou erro de rede: continua para fallback seguro
   }
 
   // Fallback padrão se não for possível obter dados externos
@@ -1055,7 +1055,7 @@ export async function resolverGeolocalizacaoEConexao(ip, infoIp, cf = {}, isCons
 /**
  * Handler HTTP Oficial do Cloudflare Workers / Pages Functions & Node.js Dispatcher
  */
-export default async function handleRequest(request, env, ctx) {
+async function handleRequest(request, env, ctx) {
   const url = new URL(request.url);
 
   // 1. Preflight CORS aberto para uso universal em APIs e Frontends
@@ -1290,3 +1290,9 @@ export default async function handleRequest(request, env, ctx) {
     }
   });
 }
+
+export default {
+  async fetch(request, env, ctx) {
+    return handleRequest(request, env, ctx);
+  }
+};

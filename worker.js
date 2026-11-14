@@ -1055,6 +1055,167 @@ export async function resolverGeolocalizacaoEConexao(ip, infoIp, cf = {}, isCons
 /**
  * Handler HTTP Oficial do Cloudflare Workers / Pages Functions & Node.js Dispatcher
  */
+
+// ??? FORENSE DE FOTOS & METADADOS EXIF / TIFF ?????????????????????????????
+function extrairExifBuffer(buffer) {
+  try {
+    const view = new DataView(buffer);
+    if (view.getUint16(0, false) !== 0xFFD8) return null; // N?o ? JPEG
+    let offset = 2;
+    while (offset < view.byteLength) {
+      const marker = view.getUint16(offset, false);
+      offset += 2;
+      if (marker === 0xFFE1) { // APP1 EXIF
+        const length = view.getUint16(offset, false);
+        offset += 2;
+        const exifHeader = view.getUint32(offset, false);
+        if (exifHeader !== 0x45786966) return null;
+        offset += 6; // 'Exif\0\0'
+        const tiffOffset = offset;
+        const littleEndian = view.getUint16(offset, false) === 0x4949;
+        offset += 4;
+        const ifdOffset = view.getUint32(offset, littleEndian);
+        offset = tiffOffset + ifdOffset;
+        if (offset >= view.byteLength) return null;
+        const numEntries = view.getUint16(offset, littleEndian);
+        offset += 2;
+        const tags = {};
+        for (let i = 0; i < numEntries && offset + 12 <= view.byteLength; i++) {
+          const tag = view.getUint16(offset, littleEndian);
+          const type = view.getUint16(offset + 2, littleEndian);
+          const count = view.getUint32(offset + 4, littleEndian);
+          const valOffset = view.getUint32(offset + 8, littleEndian);
+          offset += 12;
+          if (type === 2) {
+            const strOffset = count > 4 ? tiffOffset + valOffset : (offset - 4);
+            if (strOffset + count <= view.byteLength) {
+              let str = '';
+              for (let j = 0; j < count - 1; j++) {
+                str += String.fromCharCode(view.getUint8(strOffset + j));
+              }
+              const sTrim = str.trim();
+              if (tag === 0x010F) tags.make = sTrim;
+              if (tag === 0x0110) tags.model = sTrim;
+              if (tag === 0x0131) tags.software = sTrim;
+              if (tag === 0x9003) tags.dateTimeOriginal = sTrim;
+            }
+          }
+        }
+        return tags;
+      } else {
+        if ((marker & 0xFF00) !== 0xFF00) break;
+        const length = view.getUint16(offset, false);
+        offset += length;
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
+function analisarForenseFoto(exif) {
+  const alertas = [];
+  let score = 100;
+  let tipo = 'FOTO_CAMERA_REAL';
+  let isEdited = false;
+
+  if (!exif || (!exif.model && !exif.make && !exif.software)) {
+    return {
+      ok: true,
+      autentico: false,
+      tipo: 'CAPTURA_TELA_OU_SEM_METADADOS',
+      scoreAutenticidade: 40,
+      isCameraOriginal: false,
+      isEditado: false,
+      camera: null,
+      resumo: 'A imagem n?o cont?m metadados de c?mera ?ptica. Trata-se de uma captura de tela (print) ou arquivo comprimido por mensageiro.',
+      alertas: ['Nenhum metadado EXIF de c?mera detectado. N?o ? uma foto f?sica direta da lente.']
+    };
+  }
+
+  const software = (exif.software || '').toLowerCase();
+  const editores = ['photoshop', 'canva', 'gimp', 'paint', 'lightroom', 'snapseed', 'picsart', 'corel'];
+  const achouEditor = editores.find(ed => software.includes(ed));
+
+  if (achouEditor) {
+    tipo = 'ADULTERADO_EDITOR_GRAFICO';
+    isEdited = true;
+    score = 15;
+    alertas.push(`?? ALERTA FORENSE: A imagem foi editada ou exportada atrav?s do software gr?fico "${exif.software}". Risco de montagem ou adultera??o de dados!`);
+  }
+
+  if (!exif.dateTimeOriginal && !exif.model) {
+    score -= 30;
+    alertas.push('Metadados parciais: data ou modelo da c?mera ausentes.');
+  }
+
+  return {
+    ok: true,
+    autentico: score >= 80,
+    tipo,
+    scoreAutenticidade: score,
+    isCameraOriginal: !isEdited && Boolean(exif.model || exif.make),
+    isEditado: isEdited,
+    camera: {
+      fabricante: exif.make || 'Desconhecido',
+      modelo: exif.model || 'Desconhecido',
+      dataOriginal: exif.dateTimeOriginal || null,
+      software: exif.software || 'C?mera Nativa'
+    },
+    resumo: isEdited 
+      ? `Imagem reprocessada por ${exif.software}. Risco de adultera??o.`
+      : `Foto original capturada por ${exif.make || ''} ${exif.model || 'c?mera nativa'}.`,
+    alertas
+  };
+}
+
+function analisarDispositivoReal(b, req) {
+  const body = b || {};
+  const ua = req.headers.get('user-agent') || body.userAgent || '';
+  const cores = body.cores || body.hardwareConcurrency || 1;
+  const ramGb = body.ramGb || body.deviceMemory || 'N/A';
+  const screenW = body.screenWidth || 0;
+  const screenH = body.screenHeight || 0;
+  const touch = body.touchPoints !== undefined ? body.touchPoints : (body.maxTouchPoints || 0);
+  const gpu = body.gpuRenderer || body.rendererGpu || '';
+  const vendor = body.gpuVendor || '';
+  const platform = req.headers.get('sec-ch-ua-platform') || body.platform || '';
+
+  const isEmulador = /swiftshader|llvmpipe|virtualbox|vmware/i.test(gpu) || /emulator|bluestacks|nox/i.test(ua);
+  const isMobileUa = /Android|iPhone|iPod|Mobile/i.test(ua) || req.headers.get('sec-ch-ua-mobile') === '?1';
+  const isTabletUa = /iPad|Tablet/i.test(ua) || (touch > 1 && screenW >= 768 && screenW <= 1024);
+
+  let tipo = 'Desktop PC';
+  if (isTabletUa) tipo = 'Tablet';
+  else if (isMobileUa || (touch > 0 && screenW < 768)) tipo = 'Smartphone';
+  else if (touch === 0 && (screenW >= 1280 || /Windows|Macintosh|Linux|Win32|Win64/i.test(ua + platform))) tipo = 'Notebook / Computador Desktop';
+
+  return {
+    ok: true,
+    dispositivo: {
+      tipo,
+      isMobile: tipo === 'Smartphone' || tipo === 'Tablet',
+      isEmuladorOuBot: isEmulador,
+      confiancaClassificacao: 'ALTA'
+    },
+    hardwareReal: {
+      processadorCores: cores,
+      memoriaRamGb: ramGb,
+      resolucaoTela: screenW && screenH ? `${screenW} x ${screenH}` : 'Desconhecida',
+      suporteTouch: touch > 0,
+      touchPoints: touch,
+      gpu: {
+        vendor: vendor || 'Detectado via WebGL',
+        renderer: gpu || 'Acelerador Gr?fico Nativo'
+      }
+    },
+    sistema: {
+      plataforma: platform || 'Desconhecida',
+      userAgent: ua
+    },
+    timestamp: new Date().toISOString()
+  };
+}
+
 async function handleRequest(request, env, ctx) {
   const url = new URL(request.url);
 
@@ -1098,6 +1259,64 @@ async function handleRequest(request, env, ctx) {
         'Content-Type': 'application/json; charset=utf-8',
         'Access-Control-Allow-Origin': '*',
         'Retry-After': String(Math.max(1, Math.ceil((rl.resetAt - Date.now()) / 1000)))
+      }
+    });
+  }
+
+  const lowerPath = url.pathname.toLowerCase();
+
+  // ROTA FORENSE DE FOTOS / EXIF: POST /api/foto/forense, /api/foto ou /api/exif
+  if (lowerPath === '/api/foto/forense' || lowerPath === '/api/foto' || lowerPath === '/api/exif') {
+    let exif = null;
+    const contentType = request.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      try {
+        const body = await request.json();
+        if (body.imagemBase64 || body.image || body.base64) {
+          const b64 = (body.imagemBase64 || body.image || body.base64).replace(/^data:image\/\w+;base64,/, '');
+          const binaryStr = atob(b64);
+          const bytes = new Uint8Array(binaryStr.length);
+          for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+          exif = extrairExifBuffer(bytes.buffer);
+        } else if (body.exif) {
+          exif = body.exif;
+        }
+      } catch (_) {}
+    } else {
+      try {
+        const buf = await request.arrayBuffer();
+        if (buf && buf.byteLength > 0) {
+          exif = extrairExifBuffer(buf);
+        }
+      } catch (_) {}
+    }
+
+    const resultadoForense = analisarForenseFoto(exif);
+    return new Response(JSON.stringify(resultadoForense, null, 2), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-store'
+      }
+    });
+  }
+
+  // ROTA DE DETECÇÃO DE DISPOSITIVO REAL: GET ou POST /api/dispositivo ou /api/dispositivo/analisar
+  if (lowerPath === '/api/dispositivo' || lowerPath === '/api/dispositivo/analisar') {
+    let bodyDados = {};
+    if (request.method === 'POST') {
+      try {
+        bodyDados = await request.json();
+      } catch (_) {}
+    }
+    const resDispositivo = analisarDispositivoReal(bodyDados, request);
+    return new Response(JSON.stringify(resDispositivo, null, 2), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-store'
       }
     });
   }
@@ -1152,7 +1371,6 @@ async function handleRequest(request, env, ctx) {
 
   // 4. Formatos de Saída Rápidos (Texto puro para scripts bash/curl: ?format=text|ip|ua)
   const format = (url.searchParams.get('format') || '').toLowerCase();
-  const lowerPath = url.pathname.toLowerCase();
 
   if (format === 'ip' || format === 'text' || lowerPath.endsWith('/ip') || lowerPath.endsWith('/raw')) {
     return new Response(infoIp.ip, {
